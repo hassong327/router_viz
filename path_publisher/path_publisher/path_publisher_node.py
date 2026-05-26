@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 
+import ast
+import json
 import math
-from typing import List, Sequence, Tuple
+import os
+from typing import Dict, List, Sequence, Tuple
 
 import rclpy
 from rclpy.node import Node
@@ -56,53 +59,135 @@ def _weld_segments(
     return welded
 
 
-# Quintic Bezier control points in MAP frame (6 points per segment, used as-is).
-# The raw path is closed: last point of the last segment == first point of segment 0.
+# Quintic Bezier control points in MAP frame (6 points per segment, measured).
+# Segment boundaries are near-coincident; _weld_segments enforces exact equality
+# (segment[n].end == segment[n+1].start, with segment[n].end as the master).
 _CONTROL_POINTS_RAW: List[List[Tuple[float, float]]] = [
     [
-        (-1.163, -0.8138),
-        (-0.8635, -1.1545),
-        (-0.1942, -1.1193),
-        (0.3519, -1.0781),
-        (1.0154, -1.0781),
-        (1.6025, -1.0605),
+        (-1.2764, -0.5935),
+        (-0.8654, -1.0458),
+        (-0.4016, -1.0635),
+        (0.2149, -1.0752),
+        (0.7551, -1.0693),
+        (1.1309, -1.0693),
     ],
     [
-        (1.626, -1.0311),
-        (2.0957, -0.8902),
-        (2.3893, -0.526),
-        (2.1955, -0.0443),
-        (2.2308, 0.6371),
-        (2.2601, 3.5566),
+        (1.125, -1.059),
+        (1.6945, -1.1589),
+        (1.9353, -0.9298),
+        (2.1936, -0.6302),
+        (2.2582, -0.4011),
+        (2.2523, -0.0428),
     ],
     [
-        (2.2308, 3.163),
-        (2.2425, 3.7681),
-        (2.4304, 4.6551),
-        (1.6143, 4.5023),
-        (1.2561, 4.426),
-        (0.7159, 4.4612),
+        (2.2465, -0.0502),
+        (2.2523, 0.6489),
+        (2.2523, 1.2069),
+        (2.2641, 1.7709),
+        (2.2582, 2.4053),
+        (2.2582, 2.8517),
     ],
     [
-        (0.6866, 4.4847),
-        (0.1934, 4.4671),
-        (-0.476, 4.4377),
-        (-1.3978, 4.6022),
-        (-1.6855, 4.3966),
-        (-1.9204, 3.8855),
+        (2.2465, 2.8561),
+        (2.223, 3.5786),
+        (2.1936, 4.1249),
+        (2.5518, 4.777),
+        (1.1309, 4.3717),
+        (0.027, 4.4539),
     ],
     [
-        (-1.9439, 3.8327),
-        (-1.9497, 3.2864),
-        (-1.9615, 2.4816),
-        (-1.985, 0.3669),
-        (-2.1259, -0.244),
-        (-1.163, -0.8138),
+        (-0.0023, 4.4231),
+        (-0.6775, 4.4524),
+        (-1.294, 4.6052),
+        (-1.7109, 4.4466),
+        (-2.0984, 4.0295),
+        (-1.9575, 2.8664),
+    ],
+    [
+        (-1.9634, 2.8532),
+        (-1.9693, 1.6901),
+        (-1.9634, 1.1027),
+        (-2.1219, -0.0369),
+        (-1.617, -0.3306),
+        (-1.2823, -0.595),
     ],
 ]
 
 # C0-welded version actually published (seg[i].start := seg[i-1].end).
 CONTROL_POINTS: List[List[Tuple[float, float]]] = _weld_segments(_CONTROL_POINTS_RAW)
+
+
+def _parse_courses_text(text: str):
+    """Parse a courses file as JSON, falling back to a Python literal."""
+    text = text.strip()
+    if not text:
+        raise ValueError("course file is empty")
+    try:
+        return json.loads(text)
+    except (ValueError, json.JSONDecodeError):
+        return ast.literal_eval(text)
+
+
+def _select_course(data, course_id: int):
+    """Pick one course out of the top-level container by its number.
+
+    Top-level is a dict mapping number -> course, e.g. {"1": [...], "2": [...]}.
+    A bare list is also accepted and treated either as a list of courses
+    (1-based numbering) or, if it already looks like a single course, returned
+    as-is when course_id == 1.
+    """
+    if isinstance(data, dict):
+        for key in (str(course_id), course_id):
+            if key in data:
+                return data[key]
+        raise KeyError(
+            f"course {course_id} not found; available: {sorted(map(str, data.keys()))}"
+        )
+    if isinstance(data, list):
+        idx = course_id - 1  # numbers are 1-based
+        if 0 <= idx < len(data):
+            return data[idx]
+        raise IndexError(
+            f"course {course_id} out of range; file has {len(data)} courses"
+        )
+    raise TypeError(f"unexpected top-level type in course file: {type(data).__name__}")
+
+
+def _course_to_segments(
+    course, points_per_curve: int
+) -> List[List[Tuple[float, float]]]:
+    """Convert a course (list of curves) into segments of (x, y) tuples.
+
+    Each curve must carry exactly ``points_per_curve`` control points. Curves
+    share endpoints (segment[i].start == segment[i-1].end); the actual welding
+    happens later via _weld_segments.
+    """
+    if not isinstance(course, (list, tuple)):
+        raise TypeError(f"course must be a list of curves, got {type(course).__name__}")
+    segments: List[List[Tuple[float, float]]] = []
+    for i, curve in enumerate(course):
+        pts = [(float(p[0]), float(p[1])) for p in curve]
+        if len(pts) != points_per_curve:
+            raise ValueError(
+                f"curve {i} has {len(pts)} control points, expected {points_per_curve}"
+            )
+        segments.append(pts)
+    if not segments:
+        raise ValueError("course contains no curves")
+    return segments
+
+
+def load_control_points(
+    course_file: str, course_id: int, points_per_curve: int
+) -> List[List[Tuple[float, float]]]:
+    """Load, select, and C0-weld a course from a JSON/TXT file."""
+    if not os.path.isfile(course_file):
+        raise FileNotFoundError(f"course file not found: {course_file}")
+    with open(course_file, "r", encoding="utf-8") as fh:
+        data = _parse_courses_text(fh.read())
+    course = _select_course(data, course_id)
+    segments = _course_to_segments(course, points_per_curve)
+    return _weld_segments(segments)
 
 
 class PathPublisher(Node):
@@ -116,6 +201,9 @@ class PathPublisher(Node):
         self.declare_parameter("publish_path", True)
         self.declare_parameter("marker_line_width", 0.05)
         self.declare_parameter("arc_sample_count", 20)
+        self.declare_parameter("course_file", "")
+        self.declare_parameter("course_id", 1)
+        self.declare_parameter("points_per_curve", 6)
 
         self._frame_id = str(self.get_parameter("frame_id").value)
         self._traj_id = int(self.get_parameter("traj_id").value)
@@ -124,8 +212,22 @@ class PathPublisher(Node):
         self._marker_line_width = float(self.get_parameter("marker_line_width").value)
         self._arc_sample_count = max(3, int(self.get_parameter("arc_sample_count").value))
 
-        self._segments_msg = self._build_segments(CONTROL_POINTS)
-        self._preview_points = self._build_preview(CONTROL_POINTS)
+        course_file = str(self.get_parameter("course_file").value)
+        course_id = int(self.get_parameter("course_id").value)
+        points_per_curve = max(2, int(self.get_parameter("points_per_curve").value))
+
+        if course_file:
+            control_points = load_control_points(course_file, course_id, points_per_curve)
+            self.get_logger().info(
+                f"loaded course {course_id} from {course_file}: "
+                f"{len(control_points)} curves x {points_per_curve} control points"
+            )
+        else:
+            control_points = CONTROL_POINTS
+            self.get_logger().info("no course_file given; using built-in default course")
+
+        self._segments_msg = self._build_segments(control_points)
+        self._preview_points = self._build_preview(control_points)
 
         self._pub_ph = self.create_publisher(PhQuinticPath, "/planning/local_path_ph", 10)
         self._pub_marker = self.create_publisher(Marker, "/planning/local_path_marker", 10)

@@ -18,6 +18,9 @@ def generate_launch_description() -> LaunchDescription:
                 {"publish_path": True},
                 {"marker_line_width": 0.05},
                 {"arc_sample_count": 20},
+                {"course_file": ""},
+                {"course_id": 1},
+                {"points_per_curve": 6},
             ],
         ),
     ])
