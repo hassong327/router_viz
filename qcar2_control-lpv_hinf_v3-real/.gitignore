@@ -1,0 +1,22 @@
+results/
+__pycache__/
+*.pyc
+
+# Claude / Codex 작업 파일
+.claude/
+.codex
+.codex/
+
+# ROS2 / colcon 빌드 산출물
+build/
+install/
+log/
+
+# 에디터 / IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store

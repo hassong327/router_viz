@@ -1,0 +1,3 @@
+#!/usr/bin/env python3
+from qcar2_control_2.dashboard_viewer import main
+main()

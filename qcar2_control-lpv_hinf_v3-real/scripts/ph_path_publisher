@@ -1,0 +1,3 @@
+#!/usr/bin/env python3
+from qcar2_control_2.ph_path_publisher import main
+main()
