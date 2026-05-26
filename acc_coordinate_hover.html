@@ -170,6 +170,12 @@
       fill: var(--ok);
       stroke: #081018;
       stroke-width: 2.5;
+      cursor: grab;
+      pointer-events: all;
+    }
+
+    .bezier-draft-point:active {
+      cursor: grabbing;
     }
 
     .bezier-draft-label {
@@ -181,6 +187,7 @@
       font-weight: 800;
       dominant-baseline: middle;
       text-anchor: middle;
+      pointer-events: none;
     }
 
     .crosshair {
@@ -263,6 +270,8 @@
       margin-bottom: 12px;
     }
 
+    .btn-row.single { grid-template-columns: 1fr; }
+
     button, select, input[type="number"] {
       border: 1px solid var(--line);
       border-radius: 10px;
@@ -321,7 +330,7 @@
       padding: 10px 11px;
     }
 
-    .samples-head {
+    .section-head {
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -329,7 +338,7 @@
       margin-bottom: 8px;
     }
 
-    .samples-head h2 { margin: 0; }
+    .section-head h2 { margin: 0; }
 
     .hint {
       color: var(--muted);
@@ -434,7 +443,7 @@
     <header>
       <div>
         <h1>ACC 주행 도로 좌표 Hover Tool</h1>
-        <p class="subtitle">지도 위에 마우스를 올리면 QLabs 기준 <b>x, y</b> 좌표가 표시됩니다. 클릭하면 좌표가 샘플 목록에 저장됩니다.</p>
+        <p class="subtitle">지도 위에 마우스를 올리면 QLabs 기준 <b>x, y</b> 좌표가 표시됩니다. 베지어 모드에서 제어점을 찍고 편집할 수 있습니다.</p>
       </div>
       <div class="badge">기준 이미지: 669 × 823 px · 좌표계: QLabs / Virtual Stage</div>
     </header>
@@ -476,9 +485,8 @@
           </div>
         </div>
         <div id="nearestVal" class="nearest">nearest: —</div>
-        <div class="btn-row">
+        <div class="btn-row single">
           <button id="copyBtn" class="primary">현재 좌표 복사</button>
-          <button id="clearBtn" class="soft">샘플 삭제</button>
         </div>
 
         <div class="control-block">
@@ -497,17 +505,16 @@
         </div>
 
         <div class="control-block">
-          <div class="samples-head">
-            <h2>클릭 샘플</h2>
-            <button id="copySamplesBtn" class="soft">샘플 JSON 복사</button>
+          <div class="section-head">
+            <h2>확정 베지어 곡선</h2>
           </div>
-          <p class="hint">지도에서 클릭한 좌표가 아래에 누적됩니다.</p>
+          <p class="hint">확정한 5차 베지어 곡선의 제어점 목록입니다.</p>
           <div class="table-wrap">
             <table>
               <thead>
-                <tr><th>#</th><th>x</th><th>y</th><th>near</th></tr>
+                <tr><th>곡선#</th><th>점</th><th>x</th><th>y</th></tr>
               </thead>
-              <tbody id="sampleBody">
+              <tbody id="bezierBody">
                 <tr><td colspan="4" style="text-align:center;color:var(--muted);font-family:inherit">아직 없음</td></tr>
               </tbody>
             </table>
@@ -515,20 +522,20 @@
         </div>
 
         <div class="control-block">
-          <div class="samples-head">
-            <h2>2차 베지어 곡선 입력</h2>
+          <div class="section-head">
+            <h2>5차 베지어 곡선 입력</h2>
             <label class="check"><input id="bezierMode" type="checkbox"> 베지어 곡선 모드</label>
           </div>
-          <p id="bezierStatus" class="hint">초안 0/3 · 확정 0개</p>
+          <p id="bezierStatus" class="hint">초안 0/6 · 확정 0개</p>
           <div class="btn-row">
             <button id="bezierCommit" class="primary" disabled>베지어 확정</button>
             <button id="bezierUndo" class="soft" disabled>최근 점 지우기</button>
             <button id="bezierClearDraft" class="soft" disabled>초안 초기화</button>
             <button id="bezierPopCurve" class="soft" disabled>최근 확정 곡선 삭제</button>
-            <button id="bezierCopy" class="soft">베지어 JSON 복사</button>
+            <button id="bezierCopy" class="soft" disabled>베지어 JSON 복사</button>
             <button id="bezierClearAll" class="soft" disabled>베지어 JSON 비우기</button>
           </div>
-          <p class="small-note">베지어 모드에서 찍은 3점은 확정할 때만 JSON 목록에 추가됩니다.</p>
+          <p class="small-note">베지어 모드에서 찍은 6점은 드래그로 조정할 수 있고, 확정할 때만 JSON 목록에 추가됩니다.</p>
         </div>
 
         <details>
@@ -614,10 +621,15 @@
     const scaleXInput = document.getElementById('scaleX');
     const scaleYInput = document.getElementById('scaleY');
 
-    const sampleBody = document.getElementById('sampleBody');
-    const samples = [];
+    const BEZIER_POINT_COUNT = 6;
+    const BEZIER_SAMPLE_STEPS = 60;
+    const BEZIER_COEFFICIENTS = [1, 5, 10, 10, 5, 1];
+
+    const bezierBody = document.getElementById('bezierBody');
     const bezierDraftPoints = [];
     const bezierCurves = [];
+    let draggingIndex = null;
+    let justDragged = false;
     let lastHover = null;
 
     function worldToPixel(x, y) {
@@ -752,12 +764,32 @@
       return worldToPixel(x, y);
     }
 
+    function evaluateFifthBezier(pixelPoints, t) {
+      let px = 0;
+      let py = 0;
+      for (let i = 0; i < BEZIER_POINT_COUNT; i += 1) {
+        const weight = BEZIER_COEFFICIENTS[i] * Math.pow(1 - t, BEZIER_POINT_COUNT - 1 - i) * Math.pow(t, i);
+        px += weight * pixelPoints[i].px;
+        py += weight * pixelPoints[i].py;
+      }
+      return { px, py };
+    }
+
+    function sampleFifthBezier(pixelPoints) {
+      const sampled = [];
+      for (let step = 0; step <= BEZIER_SAMPLE_STEPS; step += 1) {
+        sampled.push(evaluateFifthBezier(pixelPoints, step / BEZIER_SAMPLE_STEPS));
+      }
+      return sampled;
+    }
+
     function updateBezierStatus() {
-      bezierStatus.textContent = `초안 ${bezierDraftPoints.length}/3 · 확정 ${bezierCurves.length}개`;
-      bezierCommit.disabled = bezierDraftPoints.length !== 3;
+      bezierStatus.textContent = `초안 ${bezierDraftPoints.length}/6 · 확정 ${bezierCurves.length}개`;
+      bezierCommit.disabled = bezierDraftPoints.length !== BEZIER_POINT_COUNT;
       bezierUndo.disabled = bezierDraftPoints.length === 0;
       bezierClearDraft.disabled = bezierDraftPoints.length === 0;
       bezierPopCurve.disabled = bezierCurves.length === 0;
+      bezierCopy.disabled = bezierCurves.length === 0;
       bezierClearAll.disabled = bezierDraftPoints.length === 0 && bezierCurves.length === 0;
     }
 
@@ -775,33 +807,35 @@
         bezierLayer.appendChild(control);
       }
 
-      if (pixelPoints.length === 3) {
-        const [p0, p1, p2] = pixelPoints;
+      if (pixelPoints.length === BEZIER_POINT_COUNT) {
+        const sampled = sampleFifthBezier(pixelPoints);
         const curve = createSvgEl('path');
         curve.setAttribute('class', 'bezier-preview-line');
-        curve.setAttribute('d', `M ${p0.px.toFixed(2)} ${p0.py.toFixed(2)} Q ${p1.px.toFixed(2)} ${p1.py.toFixed(2)} ${p2.px.toFixed(2)} ${p2.py.toFixed(2)}`);
+        curve.setAttribute('d', sampled.map((p, idx) => `${idx === 0 ? 'M' : 'L'} ${p.px.toFixed(2)} ${p.py.toFixed(2)}`).join(' '));
         bezierLayer.appendChild(curve);
       }
 
       pixelPoints.forEach((p, idx) => {
         const circle = createSvgEl('circle');
         circle.setAttribute('class', 'bezier-draft-point');
+        circle.setAttribute('data-index', String(idx));
         circle.setAttribute('cx', p.px.toFixed(2));
         circle.setAttribute('cy', p.py.toFixed(2));
         circle.setAttribute('r', '7');
+        circle.addEventListener('mousedown', startBezierDrag);
         bezierLayer.appendChild(circle);
 
         const label = createSvgEl('text');
         label.setAttribute('class', 'bezier-draft-label');
         label.setAttribute('x', (p.px + 16).toFixed(2));
         label.setAttribute('y', (p.py - 14).toFixed(2));
-        label.textContent = `B${idx + 1}`;
+        label.textContent = `P${idx}`;
         bezierLayer.appendChild(label);
       });
     }
 
     function addBezierDraftPoint(worldPoint) {
-      if (bezierDraftPoints.length >= 3) {
+      if (bezierDraftPoints.length >= BEZIER_POINT_COUNT) {
         showToast('먼저 베지어 확정 또는 초안 초기화를 하세요.');
         return;
       }
@@ -811,6 +845,66 @@
       ]);
       renderBezierDraft();
       updateBezierStatus();
+    }
+
+    function renderBezierCurves() {
+      bezierBody.innerHTML = '';
+      if (!bezierCurves.length) {
+        const row = document.createElement('tr');
+        row.innerHTML = '<td colspan="4" style="text-align:center;color:var(--muted);font-family:inherit">아직 없음</td>';
+        bezierBody.appendChild(row);
+        return;
+      }
+      bezierCurves.forEach((curve, curveIdx) => {
+        curve.forEach(([x, y], pointIdx) => {
+          const row = document.createElement('tr');
+          row.innerHTML = `<td>${curveIdx + 1}</td><td>P${pointIdx}</td><td>${x.toFixed(4)}</td><td>${y.toFixed(4)}</td>`;
+          bezierBody.appendChild(row);
+        });
+      });
+    }
+
+    function startBezierDrag(event) {
+      draggingIndex = Number(event.currentTarget.dataset.index);
+      event.preventDefault();
+      event.stopPropagation();
+    }
+
+    function draftPointIndexAtEvent(event) {
+      const pix = stageEventToImagePixel(event);
+      let best = null;
+      bezierDraftPoints.forEach((point, index) => {
+        const p = bezierPointToPixel(point);
+        const distance = Math.hypot(pix.px - p.px, pix.py - p.py);
+        if (!best || distance < best.distance) best = { index, distance };
+      });
+      return best && best.distance <= 12 ? best.index : null;
+    }
+
+    function maybeStartBezierDrag(event) {
+      if (!bezierMode.checked || !bezierDraftPoints.length || draggingIndex !== null) return;
+      const index = draftPointIndexAtEvent(event);
+      if (index === null) return;
+      draggingIndex = index;
+      event.preventDefault();
+    }
+
+    function updateDraggedBezierPoint(event) {
+      if (draggingIndex === null) return;
+      const pix = stageEventToImagePixel(event);
+      const w = pixelToWorld(pix.px, pix.py);
+      bezierDraftPoints[draggingIndex] = [
+        Number(w.x.toFixed(4)),
+        Number(w.y.toFixed(4))
+      ];
+      renderBezierDraft();
+    }
+
+    function stopBezierDrag() {
+      if (draggingIndex === null) return;
+      draggingIndex = null;
+      justDragged = true;
+      setTimeout(() => { justDragged = false; }, 50);
     }
 
     function setCalibrationInputs() {
@@ -913,38 +1007,15 @@
       }
     }
 
-    function addSample(event) {
+    function handleStageClick(event) {
+      if (justDragged) {
+        justDragged = false;
+        return;
+      }
+      if (!bezierMode.checked) return;
       const pix = stageEventToImagePixel(event);
       const w = pixelToWorld(pix.px, pix.py);
-      if (bezierMode.checked) {
-        addBezierDraftPoint(w);
-        return;
-      }
-      const nearest = nearestPoint(w.x, w.y);
-      samples.push({
-        x: Number(w.x.toFixed(4)),
-        y: Number(w.y.toFixed(4)),
-        px: Number(pix.px.toFixed(1)),
-        py: Number(pix.py.toFixed(1)),
-        near: nearest ? Number(nearest.id) : null,
-        nearDistanceM: nearest ? Number(nearest.distance.toFixed(4)) : null
-      });
-      renderSamples();
-    }
-
-    function renderSamples() {
-      sampleBody.innerHTML = '';
-      if (!samples.length) {
-        const row = document.createElement('tr');
-        row.innerHTML = '<td colspan="4" style="text-align:center;color:var(--muted);font-family:inherit">아직 없음</td>';
-        sampleBody.appendChild(row);
-        return;
-      }
-      samples.forEach((s, idx) => {
-        const row = document.createElement('tr');
-        row.innerHTML = `<td>${idx + 1}</td><td>${s.x.toFixed(4)}</td><td>${s.y.toFixed(4)}</td><td>#${s.near} / ${s.nearDistanceM.toFixed(3)}m</td>`;
-        sampleBody.appendChild(row);
-      });
+      addBezierDraftPoint(w);
     }
 
     function showToast(message) {
@@ -957,21 +1028,14 @@
 
     stage.addEventListener('mousemove', updateHover);
     stage.addEventListener('mouseleave', clearHover);
-    stage.addEventListener('click', addSample);
+    stage.addEventListener('mousedown', maybeStartBezierDrag);
+    stage.addEventListener('click', handleStageClick);
+    document.addEventListener('mousemove', updateDraggedBezierPoint);
+    document.addEventListener('mouseup', stopBezierDrag);
 
     document.getElementById('copyBtn').addEventListener('click', () => {
       if (!lastHover) { showToast('먼저 지도 위에 마우스를 올리세요.'); return; }
       copyText(coordText(lastHover, 4));
-    });
-
-    document.getElementById('clearBtn').addEventListener('click', () => {
-      samples.length = 0;
-      renderSamples();
-      showToast('샘플을 삭제했습니다.');
-    });
-
-    document.getElementById('copySamplesBtn').addEventListener('click', () => {
-      copyText(JSON.stringify(samples, null, 2));
     });
 
     bezierMode.addEventListener('change', () => {
@@ -980,13 +1044,14 @@
     });
 
     bezierCommit.addEventListener('click', () => {
-      if (bezierDraftPoints.length !== 3) {
-        showToast('제어점 3개를 먼저 찍으세요.');
+      if (bezierDraftPoints.length !== BEZIER_POINT_COUNT) {
+        showToast('제어점 6개를 먼저 찍으세요.');
         return;
       }
       bezierCurves.push(bezierDraftPoints.map(([x, y]) => [x, y]));
       bezierDraftPoints.length = 0;
       renderBezierDraft();
+      renderBezierCurves();
       updateBezierStatus();
       showToast('베지어 곡선 1개를 JSON에 추가했습니다.');
     });
@@ -1018,6 +1083,7 @@
         return;
       }
       bezierCurves.pop();
+      renderBezierCurves();
       updateBezierStatus();
       showToast('최근 확정 곡선을 삭제했습니다.');
     });
@@ -1034,8 +1100,9 @@
       bezierCurves.length = 0;
       bezierDraftPoints.length = 0;
       renderBezierDraft();
+      renderBezierCurves();
       updateBezierStatus();
-      showToast('베지어 JSON과 초안을 비웠습니다.');
+      showToast('베지어 데이터를 모두 비웠습니다.');
     });
 
     showPoints.addEventListener('change', renderPoints);
@@ -1064,8 +1131,8 @@
     setCalibrationInputs();
     renderPoints();
     renderBezierDraft();
+    renderBezierCurves();
     updateBezierStatus();
-    renderSamples();
   </script>
 </body>
 </html>
